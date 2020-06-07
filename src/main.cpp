@@ -76,6 +76,10 @@ RTC_DATA_ATTR byte        chipID[6];
 RTC_DATA_ATTR char        macAddr [14];
 // the CRC16 calculated over the mac address (used as Sensor name / ID)
 RTC_DATA_ATTR uint16_t    chip_crc;
+// Sensor Error counter (+3 on error, -1 on success)
+RTC_DATA_ATTR uint8_t     sens_err_count = 0;
+// WiFi   Error counter (+3 on error, -1 on success)
+RTC_DATA_ATTR uint8_t     wifi_err_count = 0;
 
 // Declarations
 void  
@@ -87,7 +91,9 @@ void
   goto_sleep(uint16_t seconds), 
   round_05_precision(float *value),
   readADCValue(void);
-int16_t map16(int16_t x, int16_t in_min, int16_t in_max, int16_t out_min, int16_t out_max);
+int16_t 
+  map16(int16_t x, int16_t in_min, int16_t in_max, int16_t out_min, int16_t out_max),
+  roundFloatToInt10(float * value, int8_t precision);
 
 // Will diconnect the WiFi and set wifiConnected = false
 void disconnect_WiFi()
@@ -160,7 +166,7 @@ int16_t map16(int16_t x, int16_t in_min, int16_t in_max, int16_t out_min, int16_
     return (x - in_min) * (out_max - out_min) / divisor + out_min;
 }
 
-// Will round the given float value (mus be positive)
+// Will round the given float value (must be positive)
 // to 0.5 precision which avoids unneccessary updates
 void round_05_precision(float *value)
 {    
@@ -182,6 +188,19 @@ void round_05_precision(float *value)
       *value = hum;  
     }
     DEBUGPRNTLN("\tRounded Value is now " + String(*value) + "\n");
+}
+
+// Will convert the given float value to an int (times 10) and round to the precision given (integer)
+// e.g. 10.3 will convert to 103
+// with precision 5 it will return 105. 
+int16_t roundFloatToInt10(float * value, int8_t precision)
+{
+  int16_t retVal = (int16_t)(*value * 10);
+  if(precision > 1)
+  {
+    retVal = ((retVal + (precision / 2)) / precision) * precision;
+  }
+  return retVal;
 }
 
 // Helper function to write the MAC_Address
@@ -317,10 +336,10 @@ void goto_sleep(uint16_t seconds)
   // setup the sleep time
   esp_sleep_enable_timer_wakeup(seconds * uS_TO_S_FACTOR);
 
-  runtime_microseconds_mean = runtime_microseconds / 2;
+  runtime_microseconds_mean = (runtime_microseconds * 4) / 5;
   // store the time the ESP was running to RTC memory (to be send during the next update).
   runtime_microseconds = micros();
-  runtime_microseconds_mean += runtime_microseconds / 2;
+  runtime_microseconds_mean += (runtime_microseconds * 1) / 5;
   // Go to sleep now.
 
   #ifdef DEBUG
@@ -369,12 +388,17 @@ void setup()
         #ifdef DEBUG
         DEBUGPRNT("Read DHT22 failed, err="); DEBUGPRNTLN(err);delay(2000);
         #endif
+        sens_err_count+=3;
         goto_sleep(SENSOR_ERROR_INTERVAL);
+    }
+    else
+    {
+      if(sens_err_count > 0) sens_err_count--;
     }
 
     // 0.5 precision is sufficient and will further limit WiFi transmissions to a minimum
-    round_05_precision(&humidity);
-    round_05_precision(&temperature);
+    //round_05_precision(&humidity);
+    //round_05_precision(&temperature);
 
     if(firstrun)
     {
@@ -396,8 +420,8 @@ void setup()
 
         for(uint8_t i=0; i < NUM_VALUES-1; i++)
         {
-            pTemp[i] = ( int16_t)(temperature*10);
-            pHumi[i] = (uint16_t)(humidity*10);
+            pTemp[i] = roundFloatToInt10(&temperature, 2); //( int16_t)(temperature*10);
+            pHumi[i] = roundFloatToInt10(&humidity, 5); //(uint16_t)(humidity*10);
             pVolt[i] = (uint16_t)(voltage_value);
         }
     }
@@ -411,8 +435,8 @@ void setup()
         pVolt[i] = pVolt[i+1];
     }
     // write new values to the end
-    pTemp[NUM_VALUES-2] = ( int16_t)(temperature*10);
-    pHumi[NUM_VALUES-2] = (uint16_t)(humidity*10);
+    pTemp[NUM_VALUES-2] = roundFloatToInt10(&temperature, 2); //( int16_t)(temperature*10);
+    pHumi[NUM_VALUES-2] = roundFloatToInt10(&humidity, 5); //(uint16_t)(humidity*10);
     pVolt[NUM_VALUES-2] = voltage_value;
     #ifdef DEBUG
     DEBUGPRNTLN("\nSensor was read:");
@@ -475,7 +499,12 @@ void setup()
       // we want an forced update on the next cycle
       sendMinCounter = SENSOR_MIN_UPDATE;
       checkOTA_count = SENSOR_OTA_INTERVAL;
+      wifi_err_count += 3;
       goto_sleep(SENSOR_ERROR_INTERVAL);
+    }
+    else
+    {
+      if(wifi_err_count > 0) wifi_err_count--;
     }
 
     if(checkOTA_count > SENSOR_OTA_INTERVAL)

@@ -532,6 +532,8 @@ void setup()
     String payload = "{handleTelnet(\"TH_Sens_" + String(chip_crc) + "\", \"minUpdateCount "   + String(sendMinCounter) + 
                      ": last_runtime_microsec " + String(runtime_microseconds) +
                      ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
+                     ": sensor_error_count "    + String(sens_err_count) +
+                     ": wifi_error_count "      + String(wifi_err_count) + 
                      ": time_to_next_update "   + String((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +
                      ": sensor_voltage "        + String((float)((float)volt/1000.0)) + 

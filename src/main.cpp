@@ -76,10 +76,12 @@ RTC_DATA_ATTR byte        chipID[6];
 RTC_DATA_ATTR char        macAddr [14];
 // the CRC16 calculated over the mac address (used as Sensor name / ID)
 RTC_DATA_ATTR uint16_t    chip_crc;
-// Sensor Error counter (+3 on error, -1 on success)
-RTC_DATA_ATTR uint8_t     sens_err_count = 0;
-// WiFi   Error counter (+3 on error, -1 on success)
-RTC_DATA_ATTR uint8_t     wifi_err_count = 0;
+// Sensor Error counter (+SENSOR_MIN_UPDATE on error, -1 on success)
+RTC_DATA_ATTR uint16_t    sens_err_count = 0;
+// The last Sensor err seen (gets reset on sensor Erro counter = 0?)
+RTC_DATA_ATTR int         last_sens_error = 0;
+// WiFi   Error counter (+SENSOR_MIN_UPDATE on error, -1 on success)
+RTC_DATA_ATTR uint16_t    wifi_err_count = 0;
 
 // Declarations
 void  
@@ -93,6 +95,7 @@ void
   readADCValue(void);
 int16_t 
   map16(int16_t x, int16_t in_min, int16_t in_max, int16_t out_min, int16_t out_max),
+  roundToPrecision(int16_t * value, int8_t precision),
   roundFloatToInt10(float * value, int8_t precision);
 
 // Will diconnect the WiFi and set wifiConnected = false
@@ -196,6 +199,20 @@ void round_05_precision(float *value)
 int16_t roundFloatToInt10(float * value, int8_t precision)
 {
   int16_t retVal = (int16_t)(*value * 10);
+  if(precision > 1)
+  {
+    retVal = ((retVal + (precision / 2)) / precision) * precision;
+  }
+  return retVal;
+}
+
+
+// Will round an int to the precision given (integer)
+// e.g. 10.3 will convert to 103
+// with precision 5 it will return 105. 
+int16_t roundToPrecision(int16_t * value, int8_t precision)
+{
+  int16_t retVal = *value;
   if(precision > 1)
   {
     retVal = ((retVal + (precision / 2)) / precision) * precision;
@@ -357,7 +374,7 @@ void readADCValue()
   adc_value = analogRead(Analog_channel_pin); 
   adc_power_off();
 
-  voltage_value = ((map16(adc_value & 0xFFE0, 0, 4095, 0, 6600))); // cap the lower bits for more stable readings ~50 mV capped
+  voltage_value = ((map16(adc_value /*& 0xFFE0*/, 0, 4095, 0, 6600))); // 11.06.2020 Removed this cap: cap the lower bits for more stable readings ~50 mV capped
   DEBUGPRNTLN("adc_value: " + String(adc_value));
   DEBUGPRNTLN("voltage_value: " + String(voltage_value));
 }
@@ -381,24 +398,28 @@ void setup()
 
     readADCValue();
 
-    float temperature = 0;
-    float humidity = 0;
+    int16_t temperature = 0;
+    int16_t humidity = 0;
     int err = SimpleDHTErrSuccess;
     if ((err = dht22.read2(&temperature, &humidity, NULL)) != SimpleDHTErrSuccess) {
         #ifdef DEBUG
         DEBUGPRNT("Read DHT22 failed, err="); DEBUGPRNTLN(err);delay(2000);
         #endif
-        sens_err_count+=3;
+        last_sens_error = err;
+        sens_err_count+= SENSOR_MIN_UPDATE;
         goto_sleep(SENSOR_ERROR_INTERVAL);
     }
     else
     {
-      if(sens_err_count > 0) sens_err_count--;
+      if(sens_err_count > 0)
+      {
+        sens_err_count--;
+      }
+      else
+      {
+        last_sens_error = 0;
+      }
     }
-
-    // 0.5 precision is sufficient and will further limit WiFi transmissions to a minimum
-    //round_05_precision(&humidity);
-    //round_05_precision(&temperature);
 
     if(firstrun)
     {
@@ -406,8 +427,8 @@ void setup()
             DEBUGPRNTLN("\nFirst run. We init with the current readings.");
             DEBUGPRNTLN("\t" + String(NUM_VALUES) + 
                            " values will be written with T " +
-                           String(temperature) + 
-                           ", H " + String(humidity) + " and V " + String(voltage_value) + "!\n");
+                           String((float)temperature/10.0) + 
+                           ", H " + String((float)humidity/10.0) + " and V " + String(voltage_value) + "!\n");
         #endif
         firstrun = false;
 
@@ -420,8 +441,8 @@ void setup()
 
         for(uint8_t i=0; i < NUM_VALUES-1; i++)
         {
-            pTemp[i] = roundFloatToInt10(&temperature, 2); //( int16_t)(temperature*10);
-            pHumi[i] = roundFloatToInt10(&humidity, 5); //(uint16_t)(humidity*10);
+            pTemp[i] = roundToPrecision(&temperature, 2); //( int16_t)(temperature*10);
+            pHumi[i] = roundToPrecision(&humidity, 5);    //(uint16_t)(humidity*10);
             pVolt[i] = (uint16_t)(voltage_value);
         }
     }
@@ -435,13 +456,13 @@ void setup()
         pVolt[i] = pVolt[i+1];
     }
     // write new values to the end
-    pTemp[NUM_VALUES-2] = roundFloatToInt10(&temperature, 2); //( int16_t)(temperature*10);
-    pHumi[NUM_VALUES-2] = roundFloatToInt10(&humidity, 5); //(uint16_t)(humidity*10);
+    pTemp[NUM_VALUES-2] = roundToPrecision(&temperature, 2); //( int16_t)(temperature*10);
+    pHumi[NUM_VALUES-2] = roundToPrecision(&humidity, 5);    //(uint16_t)(humidity*10);
     pVolt[NUM_VALUES-2] = voltage_value;
     #ifdef DEBUG
     DEBUGPRNTLN("\nSensor was read:");
-    DEBUGPRNTLN("\tTemperature: " + String(temperature));
-    DEBUGPRNTLN("\tHumidity:    " + String(humidity));
+    DEBUGPRNTLN("\tTemperature: " + String((float)temperature/10.0));
+    DEBUGPRNTLN("\tHumidity:    " + String((float)humidity/10.0));
     DEBUGPRNTLN("The voltage is currently: ");
     DEBUGPRNTLN("\tVoltage: " + String(voltage_value) + "V");
     DEBUGPRNTLN("\tADC Raw: " + String(adc_value));
@@ -451,7 +472,7 @@ void setup()
     uint16_t temp = 0;
     uint16_t humi = 0;
     uint32_t volt = 0;
-    uint16_t weight_div = 0.0;
+    uint16_t weight_div = 0;
     for(uint8_t i=0; i<NUM_VALUES-1; i++)
     {
         temp        += ((i+1)*2)*pTemp[i]; // oldest entry with the lowest weight
@@ -499,7 +520,7 @@ void setup()
       // we want an forced update on the next cycle
       sendMinCounter = SENSOR_MIN_UPDATE;
       checkOTA_count = SENSOR_OTA_INTERVAL;
-      wifi_err_count += 3;
+      wifi_err_count += SENSOR_MIN_UPDATE;
       goto_sleep(SENSOR_ERROR_INTERVAL);
     }
     else
@@ -533,6 +554,7 @@ void setup()
                      ": last_runtime_microsec " + String(runtime_microseconds) +
                      ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
                      ": sensor_error_count "    + String(sens_err_count) +
+                     ": last_sensor_error "     + String(last_sens_error) +
                      ": wifi_error_count "      + String(wifi_err_count) + 
                      ": time_to_next_update "   + String((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +

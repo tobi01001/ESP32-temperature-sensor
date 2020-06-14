@@ -43,6 +43,15 @@ bool wifiConnected = false;
     uint32_t now = micros();
 #endif
 
+enum sleepReason {
+  SR_DEEP_SLEEP,
+  SR_NO_NEW_DATA,
+  SR_SENSOR_ERROR,
+  SR_WIFI_ERROR,
+  SR_CONN_ERROR,
+  SR_OTHER
+};
+
 // The RTC_DATA_ATTR attrribute is used to tell the compiler/linker that these variables 
 // are put into the RTC (real time clock) memory. So they keep there values during deep sleep - amazing.
 
@@ -76,12 +85,15 @@ RTC_DATA_ATTR byte        chipID[6];
 RTC_DATA_ATTR char        macAddr [14];
 // the CRC16 calculated over the mac address (used as Sensor name / ID)
 RTC_DATA_ATTR uint16_t    chip_crc;
-// Sensor Error counter (+SENSOR_MIN_UPDATE on error, -1 on success)
+// Sensor Error counter (+10 on error, -1 on success)
 RTC_DATA_ATTR uint16_t    sens_err_count = 0;
 // The last Sensor err seen (gets reset on sensor Erro counter = 0?)
 RTC_DATA_ATTR int         last_sens_error = 0;
-// WiFi   Error counter (+SENSOR_MIN_UPDATE on error, -1 on success)
-RTC_DATA_ATTR uint16_t    wifi_err_count = 0;
+// WiFi   Error counter (+10 on error, -1 on success)
+RTC_DATA_ATTR uint16_t    wifi_conn_err_count = 0;
+RTC_DATA_ATTR uint16_t    wifi_send_err_count = 0;
+
+RTC_DATA_ATTR sleepReason SR = SR_DEEP_SLEEP;
 
 // Declarations
 void  
@@ -90,7 +102,7 @@ void
   getMACAddress(void),
   checkForUpdates(void),
   print_wakeup_reason(void),
-  goto_sleep(uint16_t seconds), 
+  goto_sleep(uint16_t seconds, sleepReason sleep), 
   round_05_precision(float *value),
   readADCValue(void);
 int16_t 
@@ -135,7 +147,7 @@ void connect_WiFi()
   // Apparently it does not make a difference if we use static IP or not. 
   // Time to connect in my environment is about 550 ms
   WiFi.begin(SECRET_SSID, SECRET_PASS);
-  uint8_t count = 4;
+  uint8_t count = 6; //increased connet timeout to 3 seconds --> to ckeck if useful. may only draw additional useless battery. Maybe 1 seconfd would be enough
   while (WiFi.status() != WL_CONNECTED) {
       delay(500);
       #ifdef DEBUG
@@ -333,7 +345,7 @@ void print_wakeup_reason()
 // function used to send the esp to deep sleep.
 // parameter:
 // uint16_t seconds -> How many seconds to sleep.
-void goto_sleep(uint16_t seconds)
+void goto_sleep(uint16_t seconds, sleepReason sleepreason)
 {
   // Strange but the ESP will fail to reconnect on the next wake if WiFi is not 
   // explicitely turned off.
@@ -363,7 +375,7 @@ void goto_sleep(uint16_t seconds)
   DEBUGPRNTLN("\nI was active for " + String(runtime_microseconds) + " microseconds.\n");
   DEBUGPRNTLN("Going to sleep for " + String(seconds) + " seconds.\n");
   #endif
-
+  SR = sleepreason;
   esp_deep_sleep_start();
   // this line will never be reached!
 }
@@ -407,7 +419,7 @@ void setup()
         #endif
         last_sens_error = err;
         sens_err_count+= SENSOR_MIN_UPDATE;
-        goto_sleep(SENSOR_ERROR_INTERVAL);
+        goto_sleep(SENSOR_ERROR_INTERVAL, SR_SENSOR_ERROR);
     }
     else
     {
@@ -504,7 +516,7 @@ void setup()
     if(!(sendData[0] | sendData[1] | sendData[2]))
     {
       DEBUGPRNTLN("No need to send because no new Data.");
-      goto_sleep(SENSOR_READ_INTERVAL);
+      goto_sleep(SENSOR_READ_INTERVAL, SR_NO_NEW_DATA);
     }
 
     DEBUGPRNTLN("\n\n");
@@ -520,12 +532,12 @@ void setup()
       // we want an forced update on the next cycle
       sendMinCounter = SENSOR_MIN_UPDATE;
       checkOTA_count = SENSOR_OTA_INTERVAL;
-      wifi_err_count += SENSOR_MIN_UPDATE;
-      goto_sleep(SENSOR_ERROR_INTERVAL);
+      wifi_conn_err_count += 10; // SENSOR_MIN_UPDATE;
+      goto_sleep(SENSOR_ERROR_INTERVAL, SR_WIFI_ERROR);
     }
     else
     {
-      if(wifi_err_count > 0) wifi_err_count--;
+      if(wifi_conn_err_count > 0) wifi_conn_err_count--;
     }
 
     if(checkOTA_count > SENSOR_OTA_INTERVAL)
@@ -542,7 +554,12 @@ void setup()
         #endif
         sendMinCounter = SENSOR_MIN_UPDATE;
         checkOTA_count = SENSOR_OTA_INTERVAL;
-        goto_sleep(SENSOR_ERROR_INTERVAL);
+        wifi_send_err_count += 10;
+        goto_sleep(SENSOR_ERROR_INTERVAL, SR_CONN_ERROR);
+    }
+    else
+    {
+      if(wifi_send_err_count > 0) wifi_send_err_count--;
     }
 
     pTemp[NUM_VALUES-1] = temp;
@@ -555,7 +572,9 @@ void setup()
                      ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
                      ": sensor_error_count "    + String(sens_err_count) +
                      ": last_sensor_error "     + String(last_sens_error) +
-                     ": wifi_error_count "      + String(wifi_err_count) + 
+                     ": wifi_error_count "      + String(wifi_conn_err_count) +
+                     ": wifi_send_err_count "   + String(wifi_send_err_count) +
+                     ": last_sleep_reason "     + String(SR);
                      ": time_to_next_update "   + String((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +
                      ": sensor_voltage "        + String((float)((float)volt/1000.0)) + 
@@ -593,7 +612,7 @@ void setup()
     client.flush();
     client.stop();
 
-    goto_sleep(SENSOR_READ_INTERVAL);
+    goto_sleep(SENSOR_READ_INTERVAL, SR_DEEP_SLEEP);
 }
 
 void loop()

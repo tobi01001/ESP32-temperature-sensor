@@ -35,6 +35,8 @@ uint16_t adc_value = 0;
 // current voltage reading in millivolts
 uint16_t voltage_value = 0;
 
+// current time it took to connect to WiFi
+uint32_t connect_time = 0;
 
 // to quickly check if we are connected to WiFi
 bool wifiConnected = false;
@@ -79,6 +81,9 @@ RTC_DATA_ATTR uint16_t    sendMinCounter = SENSOR_MIN_UPDATE;
 // while > 500 ms are used for setting up the WiFi connection....
 RTC_DATA_ATTR uint32_t    runtime_microseconds;
 RTC_DATA_ATTR uint32_t    runtime_microseconds_mean;
+// for performance measurements: How long does it taker to connect to the WiFi
+// lets compare different environments ans using WiFimanager vs. predefined ssid and pass
+RTC_DATA_ATTR uint16_t    last_time_to_connect = 0;
 // the mac address as bytes
 RTC_DATA_ATTR byte        chipID[6]; 
 // the mac address as characters
@@ -94,6 +99,8 @@ RTC_DATA_ATTR uint16_t    wifi_conn_err_count = 0;
 RTC_DATA_ATTR uint16_t    wifi_send_err_count = 0;
 
 RTC_DATA_ATTR sleepReason SR = SR_DEEP_SLEEP;
+
+
 
 // Declarations
 void  
@@ -130,6 +137,7 @@ void connect_WiFi()
   if(wifiConnected && WiFi.status() == WL_CONNECTED) return; // Already connected.
   
   #ifdef USE_WIFIMANAGER
+  // The first testing with Wifimanager revealed connect timings of around 1000 ms (almost double) with variations down to 400 ms.
   WiFiManager wifiManager;
   
   wifiManager.setTimeout(90);
@@ -146,10 +154,17 @@ void connect_WiFi()
   #else
   // Apparently it does not make a difference if we use static IP or not. 
   // Time to connect in my environment is about 550 ms
+  // short delay
+  if(!WiFi.enableSTA(true)) {
+    wifiConnected = false;
+    return;
+  }
+  delay(5);
   WiFi.begin(SECRET_SSID, SECRET_PASS);
-  uint8_t count = 6; //increased connet timeout to 3 seconds --> to ckeck if useful. may only draw additional useless battery. Maybe 1 seconfd would be enough
+  uint8_t count = 100; //Timeout roughly 1 second.
   while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
+      // 10 ms delay to proceed quite fast in case we are connected...
+      delay(10);
       #ifdef DEBUG
       DEBUGPRNTLN("Connecting to WiFi..");
       #endif
@@ -369,13 +384,15 @@ void goto_sleep(uint16_t seconds, sleepReason sleepreason)
   // store the time the ESP was running to RTC memory (to be send during the next update).
   runtime_microseconds = micros();
   runtime_microseconds_mean += (runtime_microseconds * 1) / 5;
+
+  if(connect_time) last_time_to_connect = connect_time / 1000;
+  SR = sleepreason;
   // Go to sleep now.
 
   #ifdef DEBUG
   DEBUGPRNTLN("\nI was active for " + String(runtime_microseconds) + " microseconds.\n");
   DEBUGPRNTLN("Going to sleep for " + String(seconds) + " seconds.\n");
   #endif
-  SR = sleepreason;
   esp_deep_sleep_start();
   // this line will never be reached!
 }
@@ -522,16 +539,17 @@ void setup()
     DEBUGPRNTLN("\n\n");
 
     DEBUGPRNTLN("Going to connect to WiFi:");
-    
+    connect_time = micros();;
     connect_WiFi();
-
+    connect_time = micros() - connect_time;
     DEBUGPRNTLN("Done - Connecting to WiFi");
     
     if(!wifiConnected) // this did not work as expected....
     {
-      // we want an forced update on the next cycle
-      sendMinCounter = SENSOR_MIN_UPDATE;
-      checkOTA_count = SENSOR_OTA_INTERVAL;
+      // does not make sens to check for FW if wifi is not working.
+      // so we will keep the "old interval"
+      // sendMinCounter = SENSOR_MIN_UPDATE;
+      // checkOTA_count = SENSOR_OTA_INTERVAL;
       wifi_conn_err_count += 10; // SENSOR_MIN_UPDATE;
       goto_sleep(SENSOR_ERROR_INTERVAL, SR_WIFI_ERROR);
     }
@@ -552,8 +570,10 @@ void setup()
         #ifdef DEBUG
         DEBUGPRNTLN("connection failed");
         #endif
-        sendMinCounter = SENSOR_MIN_UPDATE;
-        checkOTA_count = SENSOR_OTA_INTERVAL;
+        // does not make sens to check for FW if wifi is not working.
+        // so we will keep the "old interval"
+        // sendMinCounter = SENSOR_MIN_UPDATE;
+        // checkOTA_count = SENSOR_OTA_INTERVAL;
         wifi_send_err_count += 10;
         goto_sleep(SENSOR_ERROR_INTERVAL, SR_CONN_ERROR);
     }
@@ -570,11 +590,14 @@ void setup()
     String payload = "{handleTelnet(\"TH_Sens_" + String(chip_crc) + "\", \"minUpdateCount "   + String(sendMinCounter) + 
                      ": last_runtime_microsec " + String(runtime_microseconds) +
                      ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
+                     ": wifi_connect_time_us "  + String(connect_time) +
+                     ": last_wifi_conn_time_ms "+ String(last_time_to_connect) +
+                     ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
                      ": sensor_error_count "    + String(sens_err_count) +
                      ": last_sensor_error "     + String(last_sens_error) +
                      ": wifi_error_count "      + String(wifi_conn_err_count) +
                      ": wifi_send_err_count "   + String(wifi_send_err_count) +
-                     ": last_sleep_reason "     + String(SR);
+                     ": last_sleep_reason "     + String(SR) +
                      ": time_to_next_update "   + String((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +
                      ": sensor_voltage "        + String((float)((float)volt/1000.0)) + 

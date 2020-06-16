@@ -6,3 +6,4 @@
 .vscode
 include/secrets.h
 export
+ESP32_temp_sensor.code-workspace

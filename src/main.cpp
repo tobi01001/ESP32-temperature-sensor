@@ -100,9 +100,6 @@ RTC_DATA_ATTR uint16_t    wifi_send_err_count = 0;
 
 RTC_DATA_ATTR sleepReason SR = SR_DEEP_SLEEP;
 
-RTC_DATA_ATTR bool        data_was_send = false;
-
-
 
 // Declarations
 void  
@@ -470,7 +467,6 @@ void setup()
         sendMinCounter = SENSOR_MIN_UPDATE;
 
         sendData[0] = sendData[1] = sendData[2] = true;
-        data_was_send = false;
 
         for(uint8_t i=0; i < NUM_VALUES-1; i++)
         {
@@ -529,28 +525,16 @@ void setup()
     DEBUGPRNTLN(  "\tCurrent V: " + String(String((float)((float)volt/1000.0))) + "\n");
     #endif
     
-    // only increase if data which needsx to be send was actually send
-    // so an update is enforced even if there are sensor or WiFi errors inbetween
-    // do not know yet if that works as expected...
-    if(data_was_send)
-    {
-      checkOTA_count++;
-      sendMinCounter++;
-    }
 
     if(temp               != pTemp[NUM_VALUES-1]) { sendData[0] = true; DEBUGPRNTLN("Need to send data because of new Temperature");}
     if(humi               != pHumi[NUM_VALUES-1]) { sendData[1] = true; DEBUGPRNTLN("Need to send data because of new Humidity");}
-    if(checkOTA_count   >  SENSOR_OTA_INTERVAL) { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of FW Update Interval");}
-    if(sendMinCounter   >  SENSOR_MIN_UPDATE)   { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of Sensor Min Interval");} 
+    if(++checkOTA_count   >  SENSOR_OTA_INTERVAL) { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of FW Update Interval");}
+    if(++sendMinCounter   >  SENSOR_MIN_UPDATE)   { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of Sensor Min Interval");} 
   
-    if(!(sendData[0] | sendData[1] | sendData[2]))
+    if(!(sendData[0] | sendData[1] | sendData[2]) )
     {
       DEBUGPRNTLN("No need to send because no new Data.");
       goto_sleep(SENSOR_READ_INTERVAL, SR_NO_NEW_DATA);
-    }
-    else
-    {
-      data_was_send = false;
     }
 
     DEBUGPRNTLN("\n\n");
@@ -559,16 +543,20 @@ void setup()
     connect_time = millis();;
     connect_WiFi();
     
+    if(!wifiConnected) // lets try once more
+    {
+      disconnect_WiFi();
+      delay(10);
+      connect_WiFi();
+    }
+
     DEBUGPRNTLN("Done - Connecting to WiFi");
     
     if(!wifiConnected) // this did not work as expected....
     {
       connect_time = 0;
-      // does not make sens to check for FW if wifi is not working.
-      // so we will keep the "old interval"
-      // sendMinCounter = SENSOR_MIN_UPDATE;
-      // checkOTA_count = SENSOR_OTA_INTERVAL;
-      wifi_conn_err_count += 10; // SENSOR_MIN_UPDATE;
+      
+      wifi_conn_err_count += 10; 
       goto_sleep(SENSOR_ERROR_INTERVAL, SR_WIFI_ERROR);
     }
     else
@@ -589,10 +577,7 @@ void setup()
         #ifdef DEBUG
         DEBUGPRNTLN("connection failed");
         #endif
-        // does not make sens to check for FW if wifi is not working.
-        // so we will keep the "old interval"
-        // sendMinCounter = SENSOR_MIN_UPDATE;
-        // checkOTA_count = SENSOR_OTA_INTERVAL;
+        
         wifi_send_err_count += 10;
         goto_sleep(SENSOR_ERROR_INTERVAL, SR_CONN_ERROR);
     }
@@ -621,7 +606,7 @@ void setup()
                      ": wifi_send_err_count "   + String(wifi_send_err_count) +
                      ": wifi_rssi "             + String(WiFi.RSSI()) +
                      ": last_sleep_reason "     + String(SR) +
-                     ": time_to_next_update "   + String((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL) +
+                     ": time_to_next_update "   + String(sendMinCounter<=SENSOR_MIN_UPDATE?((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL):0) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +
                      ": sensor_voltage "        + String((float)((float)volt/1000.0)) + 
                      ": volt_raw "              + String((float)((float)pVolt[NUM_VALUES-2]/1000.0)) + 
@@ -643,7 +628,7 @@ void setup()
                           ": sensor_type "      + String(SENSOR_TYPE) +
                           ": sensor_interval "  + String(SENSOR_READ_INTERVAL) +
                           ": MAC_ADDRESS "      + String(macAddr);
-      // if we did send, the next enfocred sending counter starts fresh
+      // if we did send, the next enforced sending counter starts fresh
       sendMinCounter = 0; 
     }
     payload += "\")}\r\n";
@@ -657,7 +642,6 @@ void setup()
     client.print("exit\r\n");
     client.flush();
     client.stop();
-    data_was_send = true;
     goto_sleep(SENSOR_READ_INTERVAL, SR_DEEP_SLEEP);
 }
 

@@ -36,7 +36,7 @@ uint16_t adc_value = 0;
 uint16_t voltage_value = 0;
 
 // current time it took to connect to WiFi
-uint32_t connect_time = 0;
+uint16_t connect_time = 0;
 
 // to quickly check if we are connected to WiFi
 bool wifiConnected = false;
@@ -100,6 +100,8 @@ RTC_DATA_ATTR uint16_t    wifi_send_err_count = 0;
 
 RTC_DATA_ATTR sleepReason SR = SR_DEEP_SLEEP;
 
+RTC_DATA_ATTR bool        data_was_send = false;
+
 
 
 // Declarations
@@ -161,10 +163,10 @@ void connect_WiFi()
   }
   delay(5);
   WiFi.begin(SECRET_SSID, SECRET_PASS);
-  uint8_t count = 100; //Timeout roughly 1 second.
+  uint16_t count = 1500; //Timeout roughly 1 second.
   while (WiFi.status() != WL_CONNECTED) {
-      // 10 ms delay to proceed quite fast in case we are connected...
-      delay(10);
+      // 1 ms delay to proceed quite fast in case we are connected...
+      delay(1);
       #ifdef DEBUG
       DEBUGPRNTLN("Connecting to WiFi..");
       #endif
@@ -175,6 +177,7 @@ void connect_WiFi()
       }
   }
   #endif
+  delay(5);
   wifiConnected = true;
 
   DEBUGPRNTLN("WiFi connected");
@@ -385,7 +388,7 @@ void goto_sleep(uint16_t seconds, sleepReason sleepreason)
   runtime_microseconds = micros();
   runtime_microseconds_mean += (runtime_microseconds * 1) / 5;
 
-  if(connect_time) last_time_to_connect = connect_time / 1000;
+  if(connect_time) last_time_to_connect = connect_time;
   SR = sleepreason;
   // Go to sleep now.
 
@@ -467,6 +470,7 @@ void setup()
         sendMinCounter = SENSOR_MIN_UPDATE;
 
         sendData[0] = sendData[1] = sendData[2] = true;
+        data_was_send = false;
 
         for(uint8_t i=0; i < NUM_VALUES-1; i++)
         {
@@ -524,28 +528,42 @@ void setup()
     DEBUGPRNTLN(  "\tCurrent H: " + String(String((float)((float)humi/10.0))));
     DEBUGPRNTLN(  "\tCurrent V: " + String(String((float)((float)volt/1000.0))) + "\n");
     #endif
+    
+    // only increase if data which needsx to be send was actually send
+    // so an update is enforced even if there are sensor or WiFi errors inbetween
+    // do not know yet if that works as expected...
+    if(data_was_send)
+    {
+      checkOTA_count++;
+      sendMinCounter++;
+    }
 
     if(temp               != pTemp[NUM_VALUES-1]) { sendData[0] = true; DEBUGPRNTLN("Need to send data because of new Temperature");}
     if(humi               != pHumi[NUM_VALUES-1]) { sendData[1] = true; DEBUGPRNTLN("Need to send data because of new Humidity");}
-    if(++checkOTA_count   >  SENSOR_OTA_INTERVAL) { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of FW Update Interval");}
-    if(++sendMinCounter   >  SENSOR_MIN_UPDATE)   { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of Sensor Min Interval");} 
+    if(checkOTA_count   >  SENSOR_OTA_INTERVAL) { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of FW Update Interval");}
+    if(sendMinCounter   >  SENSOR_MIN_UPDATE)   { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of Sensor Min Interval");} 
   
     if(!(sendData[0] | sendData[1] | sendData[2]))
     {
       DEBUGPRNTLN("No need to send because no new Data.");
       goto_sleep(SENSOR_READ_INTERVAL, SR_NO_NEW_DATA);
     }
+    else
+    {
+      data_was_send = false;
+    }
 
     DEBUGPRNTLN("\n\n");
 
     DEBUGPRNTLN("Going to connect to WiFi:");
-    connect_time = micros();;
+    connect_time = millis();;
     connect_WiFi();
-    connect_time = micros() - connect_time;
+    
     DEBUGPRNTLN("Done - Connecting to WiFi");
     
     if(!wifiConnected) // this did not work as expected....
     {
+      connect_time = 0;
       // does not make sens to check for FW if wifi is not working.
       // so we will keep the "old interval"
       // sendMinCounter = SENSOR_MIN_UPDATE;
@@ -555,6 +573,7 @@ void setup()
     }
     else
     {
+      connect_time = millis() - connect_time;
       if(wifi_conn_err_count > 0) wifi_conn_err_count--;
     }
 
@@ -563,7 +582,7 @@ void setup()
         checkOTA_count = 0;
         checkForUpdates();
     }
-
+    uint16_t srv_connect_time = millis();
     WiFiClient client;
     
     if (!client.connect(host, TelNetPort)) {
@@ -581,6 +600,8 @@ void setup()
     {
       if(wifi_send_err_count > 0) wifi_send_err_count--;
     }
+    srv_connect_time = millis() - srv_connect_time;
+    
 
     pTemp[NUM_VALUES-1] = temp;
     pHumi[NUM_VALUES-1] = humi;
@@ -590,13 +611,15 @@ void setup()
     String payload = "{handleTelnet(\"TH_Sens_" + String(chip_crc) + "\", \"minUpdateCount "   + String(sendMinCounter) + 
                      ": last_runtime_microsec " + String(runtime_microseconds) +
                      ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
-                     ": wifi_connect_time_us "  + String(connect_time) +
+                     ": wifi_connect_time_ms "  + String(connect_time) +
+                     ": serv_connect_time_ms "  + String(srv_connect_time) +
                      ": last_wifi_conn_time_ms "+ String(last_time_to_connect) +
                      ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
                      ": sensor_error_count "    + String(sens_err_count) +
                      ": last_sensor_error "     + String(last_sens_error) +
                      ": wifi_error_count "      + String(wifi_conn_err_count) +
                      ": wifi_send_err_count "   + String(wifi_send_err_count) +
+                     ": wifi_rssi "             + String(WiFi.RSSI()) +
                      ": last_sleep_reason "     + String(SR) +
                      ": time_to_next_update "   + String((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +
@@ -634,7 +657,7 @@ void setup()
     client.print("exit\r\n");
     client.flush();
     client.stop();
-
+    data_was_send = true;
     goto_sleep(SENSOR_READ_INTERVAL, SR_DEEP_SLEEP);
 }
 

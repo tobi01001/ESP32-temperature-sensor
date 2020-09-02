@@ -35,24 +35,48 @@ uint16_t adc_value = 0;
 // current voltage reading in millivolts
 uint16_t voltage_value = 0;
 
-// current time it took to connect to WiFi
-uint16_t connect_time = 0;
-
-// to quickly check if we are connected to WiFi
-bool wifiConnected = false;
-
-#ifdef DEBUG
-    uint32_t now = micros();
-#endif
-
 enum sleepReason {
-  SR_DEEP_SLEEP,
+  SR_NOTHING,
   SR_NO_NEW_DATA,
+  SR_SEND_DATA,
   SR_SENSOR_ERROR,
   SR_WIFI_ERROR,
   SR_CONN_ERROR,
   SR_OTHER
 };
+
+// to quickly check if we are connected to WiFi
+bool wifiConnected = false;
+
+WiFiClient *client = NULL;
+
+#ifdef SENSOR_MEASURE_PERFORMANCE
+// current time it took to connect to WiFi
+int16_t connect_time = 0;
+
+
+
+// just for some performance meaurements - see how long the sketch was run.
+// Reading and sending of sensor values takes (in my environment) less than 700 ms 
+// while majority is used for setting up the WiFi connection....
+RTC_DATA_ATTR uint16_t    runtimes_milliseconds[SENSOR_MIN_UPDATE];
+RTC_DATA_ATTR uint16_t    runtime_milliseconds_mean;
+RTC_DATA_ATTR uint8_t     rt_counter;
+// for performance measurements: How long does it taker to connect to the WiFi
+// lets compare different environments ans using WiFimanager vs. predefined ssid and pass
+RTC_DATA_ATTR  int16_t    last_time_to_connect = 0;
+// Sensor Error counter (+10 on error, -1 on success)
+RTC_DATA_ATTR uint16_t    sens_err_count = 0;
+// The last Sensor err seen (gets reset on sensor Erro counter = 0?)
+RTC_DATA_ATTR int         last_sens_error = 0;
+// WiFi   Error counter (+10 on error, -1 on success)
+RTC_DATA_ATTR uint16_t    wifi_conn_err_count = 0;
+RTC_DATA_ATTR uint16_t    wifi_send_err_count = 0;
+
+RTC_DATA_ATTR sleepReason SR = SR_NOTHING;
+RTC_DATA_ATTR sleepReason SRs[SENSOR_MIN_UPDATE];
+
+#endif
 
 // The RTC_DATA_ATTR attrribute is used to tell the compiler/linker that these variables 
 // are put into the RTC (real time clock) memory. So they keep there values during deep sleep - amazing.
@@ -69,41 +93,24 @@ RTC_DATA_ATTR uint16_t    pHumi[NUM_VALUES];
 // The last value represents the last "weighted mean value". 
 // this is used to check if the voltage changed.
 RTC_DATA_ATTR uint16_t    pVolt[NUM_VALUES];
-// Check if stzarted the first time /i.e. RTC variables not initialized)
+// Check if started the first time /i.e. RTC variables not initialized)
 // This could be checked with the "boot reason" as well.
 RTC_DATA_ATTR bool        firstrun = true;
 // Counter to check when the next OTA check is due.
 RTC_DATA_ATTR uint8_t     checkOTA_count = SENSOR_OTA_INTERVAL;  // to only check once every x minutes
 // Counter to check when the next update needs to be send regardless if values have changed.
 RTC_DATA_ATTR uint16_t    sendMinCounter = SENSOR_MIN_UPDATE;
-// just for some performance meaurements - see how long the sketch was run.
-// Reading and sending of sensor values takes (in my environment) less than 700 ms 
-// while > 500 ms are used for setting up the WiFi connection....
-RTC_DATA_ATTR uint32_t    runtime_microseconds;
-RTC_DATA_ATTR uint32_t    runtime_microseconds_mean;
-// for performance measurements: How long does it taker to connect to the WiFi
-// lets compare different environments ans using WiFimanager vs. predefined ssid and pass
-RTC_DATA_ATTR uint16_t    last_time_to_connect = 0;
+
 // the mac address as bytes
 RTC_DATA_ATTR byte        chipID[6]; 
 // the mac address as characters
 RTC_DATA_ATTR char        macAddr [14];
 // the CRC16 calculated over the mac address (used as Sensor name / ID)
 RTC_DATA_ATTR uint16_t    chip_crc;
-// Sensor Error counter (+10 on error, -1 on success)
-RTC_DATA_ATTR uint16_t    sens_err_count = 0;
-// The last Sensor err seen (gets reset on sensor Erro counter = 0?)
-RTC_DATA_ATTR int         last_sens_error = 0;
-// WiFi   Error counter (+10 on error, -1 on success)
-RTC_DATA_ATTR uint16_t    wifi_conn_err_count = 0;
-RTC_DATA_ATTR uint16_t    wifi_send_err_count = 0;
-
-RTC_DATA_ATTR sleepReason SR = SR_DEEP_SLEEP;
-
 
 // Declarations
 void  
-  disconnect_WiFi(void),
+  disconnect_WiFi(bool),
   connect_WiFi(void),
   getMACAddress(void),
   checkForUpdates(void),
@@ -117,13 +124,25 @@ int16_t
   roundFloatToInt10(float * value, int8_t precision);
 
 // Will diconnect the WiFi and set wifiConnected = false
-void disconnect_WiFi()
+void disconnect_WiFi(bool wifi_off = true)
 {
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  // and we use the low level ESP framework functions to turn off WiFi finally
-  // I did not compare, nor measure if there is a difference or if this is actualy required.
-  //esp_wifi_stop();
+  // lets do this twice.... seems to be not working all the time
+  // and if it did not work it seems we miss the update...
+  uint8_t disconnect_counter = 3;
+  bool disconnected = false;
+  while(disconnected && disconnect_counter--)
+  {
+    disconnected = WiFi.disconnect(false);
+    delay(5);
+  }
+  if(wifi_off) 
+  {
+    WiFi.disconnect(wifi_off);
+    delay(5);
+    WiFi.mode(WIFI_OFF);  //redundant but who cares....
+  }
+  
+  // We are still not sure if disconnect worked but we consider it "done"
   wifiConnected = false;
 }
 
@@ -160,16 +179,16 @@ void connect_WiFi()
   }
   delay(5);
   WiFi.begin(SECRET_SSID, SECRET_PASS);
-  uint16_t count = 1500; //Timeout roughly 1 second.
+  uint16_t count = 500; //Timeout roughly .5 seconds.
   while (WiFi.status() != WL_CONNECTED) {
       // 1 ms delay to proceed quite fast in case we are connected...
       delay(1);
-      #ifdef DEBUG
-      DEBUGPRNTLN("Connecting to WiFi..");
-      #endif
       if(!count--) 
       {
           wifiConnected = false;
+          #ifdef DEBUG
+          DEBUGPRNTLN("WiFi connection failed..");
+          #endif
           return;
       }
   }
@@ -235,7 +254,7 @@ int16_t roundFloatToInt10(float * value, int8_t precision)
 
 
 // Will round an int to the precision given (integer)
-// e.g. 10.3 will convert to 103
+// e.g. 103
 // with precision 5 it will return 105. 
 int16_t roundToPrecision(int16_t * value, int8_t precision)
 {
@@ -360,13 +379,13 @@ void print_wakeup_reason()
 // function used to send the esp to deep sleep.
 // parameter:
 // uint16_t seconds -> How many seconds to sleep.
-void goto_sleep(uint16_t seconds, sleepReason sleepreason)
+void goto_sleep(uint16_t seconds, sleepReason sleepreason=SR_OTHER)
 {
   // Strange but the ESP will fail to reconnect on the next wake if WiFi is not 
   // explicitely turned off.
   // further, this will save additional energy.
 
-  disconnect_WiFi();
+  disconnect_WiFi(true);
 
   // we also explicitely turn off BlueTooth
   btStop();
@@ -380,17 +399,27 @@ void goto_sleep(uint16_t seconds, sleepReason sleepreason)
   // setup the sleep time
   esp_sleep_enable_timer_wakeup(seconds * uS_TO_S_FACTOR);
 
-  runtime_microseconds_mean = (runtime_microseconds * 4) / 5;
-  // store the time the ESP was running to RTC memory (to be send during the next update).
-  runtime_microseconds = micros();
-  runtime_microseconds_mean += (runtime_microseconds * 1) / 5;
+  #ifdef SENSOR_MEASURE_PERFORMANCE
+  if(++rt_counter >= SENSOR_MIN_UPDATE) rt_counter=0;
+  runtimes_milliseconds[rt_counter] = millis();
+  uint32_t sum = 0;
+  for(uint8_t i=0; i<SENSOR_MIN_UPDATE; i++)
+  {
+    sum+=runtimes_milliseconds[i];
+  }
+  runtime_milliseconds_mean = (uint16_t)(sum/SENSOR_MIN_UPDATE);
+  
 
-  if(connect_time) last_time_to_connect = connect_time;
+  last_time_to_connect = connect_time;
   SR = sleepreason;
-  // Go to sleep now.
-
+  SRs[rt_counter] = sleepreason;
   #ifdef DEBUG
   DEBUGPRNTLN("\nI was active for " + String(runtime_microseconds) + " microseconds.\n");
+  #endif
+  #endif
+  
+  // Go to sleep now.
+  #ifdef DEBUG
   DEBUGPRNTLN("Going to sleep for " + String(seconds) + " seconds.\n");
   #endif
   esp_deep_sleep_start();
@@ -410,13 +439,16 @@ void readADCValue()
 
 void setup()
 {
+    #ifdef SENSOR_MEASURE_PERFORMANCE
+    uint32_t starttime = millis();
+    #endif
     bool sendData[3] = {false, false, false};
     #ifdef DEBUG
     delay(100);
     #else
     //delay(10);
     #endif
-    disconnect_WiFi();
+    disconnect_WiFi(true);
     adc_power_off();
     
     #ifdef DEBUG
@@ -434,12 +466,15 @@ void setup()
         #ifdef DEBUG
         DEBUGPRNT("Read DHT22 failed, err="); DEBUGPRNTLN(err);delay(2000);
         #endif
+        #ifdef SENSOR_MEASURE_PERFORMANCE
         last_sens_error = err;
         sens_err_count+= SENSOR_MIN_UPDATE;
+        #endif
         goto_sleep(SENSOR_ERROR_INTERVAL, SR_SENSOR_ERROR);
     }
     else
     {
+      #ifdef SENSOR_MEASURE_PERFORMANCE
       if(sens_err_count > 0)
       {
         sens_err_count--;
@@ -448,6 +483,7 @@ void setup()
       {
         last_sens_error = 0;
       }
+      #endif
     }
 
     if(firstrun)
@@ -459,7 +495,7 @@ void setup()
                            String((float)temperature/10.0) + 
                            ", H " + String((float)humidity/10.0) + " and V " + String(voltage_value) + "!\n");
         #endif
-        firstrun = false;
+        //firstrun = false;
 
         getMACAddress();
 
@@ -470,10 +506,17 @@ void setup()
 
         for(uint8_t i=0; i < NUM_VALUES-1; i++)
         {
-            pTemp[i] = roundToPrecision(&temperature, 2); //( int16_t)(temperature*10);
-            pHumi[i] = roundToPrecision(&humidity, 5);    //(uint16_t)(humidity*10);
+            pTemp[i] = roundToPrecision(&temperature, SENSOR_T_PRECISION);
+            pHumi[i] = roundToPrecision(&humidity, SENSOR_H_PRECISION);
             pVolt[i] = (uint16_t)(voltage_value);
         }
+        #ifdef SENSOR_MEASURE_PERFORMANCE
+        for(uint8_t i=0; i<SENSOR_MIN_UPDATE; i++)
+        {
+          runtimes_milliseconds[i] = 500; // init with 500 ms
+        }
+        rt_counter=0;
+        #endif
     }
 
 
@@ -485,8 +528,8 @@ void setup()
         pVolt[i] = pVolt[i+1];
     }
     // write new values to the end
-    pTemp[NUM_VALUES-2] = roundToPrecision(&temperature, 2); //( int16_t)(temperature*10);
-    pHumi[NUM_VALUES-2] = roundToPrecision(&humidity, 5);    //(uint16_t)(humidity*10);
+    pTemp[NUM_VALUES-2] = roundToPrecision(&temperature, SENSOR_T_PRECISION); 
+    pHumi[NUM_VALUES-2] = roundToPrecision(&humidity, SENSOR_H_PRECISION);
     pVolt[NUM_VALUES-2] = voltage_value;
     #ifdef DEBUG
     DEBUGPRNTLN("\nSensor was read:");
@@ -524,7 +567,7 @@ void setup()
     DEBUGPRNTLN(  "\tCurrent H: " + String(String((float)((float)humi/10.0))));
     DEBUGPRNTLN(  "\tCurrent V: " + String(String((float)((float)volt/1000.0))) + "\n");
     #endif
-    
+
 
     if(temp               != pTemp[NUM_VALUES-1]) { sendData[0] = true; DEBUGPRNTLN("Need to send data because of new Temperature");}
     if(humi               != pHumi[NUM_VALUES-1]) { sendData[1] = true; DEBUGPRNTLN("Need to send data because of new Humidity");}
@@ -533,36 +576,46 @@ void setup()
   
     if(!(sendData[0] | sendData[1] | sendData[2]) )
     {
-      DEBUGPRNTLN("No need to send because no new Data.");
-      goto_sleep(SENSOR_READ_INTERVAL, SR_NO_NEW_DATA);
+      DEBUGPRNTLN("No need to send because no new Data. Will sleep 3 times longer...");
+      checkOTA_count += 3;
+      sendMinCounter += 3;
+      goto_sleep(SENSOR_READ_INTERVAL*3, SR_NO_NEW_DATA);
     }
 
     DEBUGPRNTLN("\n\n");
 
     DEBUGPRNTLN("Going to connect to WiFi:");
-    connect_time = millis();;
-    connect_WiFi();
+    #ifdef SENSOR_MEASURE_PERFORMANCE
+    uint32_t current_ms = millis();
+    #endif
     
-    if(!wifiConnected) // lets try once more
+    uint8_t wifi_retry = SENSOR_WIFI_RETRY_COUNT;
+    while(!wifiConnected && wifi_retry--)
     {
-      disconnect_WiFi();
-      delay(10);
       connect_WiFi();
+      if(!wifiConnected) // lets try once more
+      {
+        disconnect_WiFi(false);
+        // delay(5); // delay now in disconnect_WiFi
+      }
     }
-
     DEBUGPRNTLN("Done - Connecting to WiFi");
     
     if(!wifiConnected) // this did not work as expected....
     {
-      connect_time = 0;
+      #ifdef SENSOR_MEASURE_PERFORMANCE
+      connect_time = -100;
       
       wifi_conn_err_count += 10; 
+      #endif
       goto_sleep(SENSOR_ERROR_INTERVAL, SR_WIFI_ERROR);
     }
     else
     {
-      connect_time = millis() - connect_time;
+      #ifdef SENSOR_MEASURE_PERFORMANCE
+      connect_time = (int16_t)(millis() - current_ms);
       if(wifi_conn_err_count > 0) wifi_conn_err_count--;
+      #endif
     }
 
     if(checkOTA_count > SENSOR_OTA_INTERVAL)
@@ -570,23 +623,45 @@ void setup()
         checkOTA_count = 0;
         checkForUpdates();
     }
-    uint16_t srv_connect_time = millis();
-    WiFiClient client;
     
-    if (!client.connect(host, TelNetPort)) {
+    #ifdef SENSOR_MEASURE_PERFORMANCE
+    current_ms = millis();
+    
+    int16_t srv_connect_time = 0;
+    #endif
+    uint8_t server_retry = SENSOR_SERVER_RETRY_COUNT;
+    bool server_connected = false;
+    while(!server_connected && server_retry--)
+    {
+      client = new WiFiClient();
+      server_connected = client->connect(host, TelNetPort);
+      if(!server_connected)
+      {
+        client->stop();
+        delete client;
+      }
+      delay(5);
+    }
+
+    if (!server_connected || !client) {
         #ifdef DEBUG
         DEBUGPRNTLN("connection failed");
         #endif
-        
+        #ifdef SENSOR_MEASURE_PERFORMANCE
+        srv_connect_time = -100;
         wifi_send_err_count += 10;
+        #endif
         goto_sleep(SENSOR_ERROR_INTERVAL, SR_CONN_ERROR);
     }
+    #ifdef SENSOR_MEASURE_PERFORMANCE
     else
     {
+      
       if(wifi_send_err_count > 0) wifi_send_err_count--;
+      
     }
-    srv_connect_time = millis() - srv_connect_time;
-    
+    srv_connect_time = (int16_t) (millis() - current_ms);
+    #endif
 
     pTemp[NUM_VALUES-1] = temp;
     pHumi[NUM_VALUES-1] = humi;
@@ -594,42 +669,73 @@ void setup()
 
     // Think this takes awhile as well but not that much as compared to the WiFi
     String payload = "{handleTelnet(\"TH_Sens_" + String(chip_crc) + "\", \"minUpdateCount "   + String(sendMinCounter) + 
-                     ": last_runtime_microsec " + String(runtime_microseconds) +
-                     ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
+                     #ifdef SENSOR_MEASURE_PERFORMANCE
+                     ": start_time_ms "         + String(starttime) +
+                     ": last_runtime_ms "       + String(runtimes_milliseconds[rt_counter]) +
+                     ": mean_runtime_ms "       + String(runtime_milliseconds_mean) +
                      ": wifi_connect_time_ms "  + String(connect_time) +
                      ": serv_connect_time_ms "  + String(srv_connect_time) +
                      ": last_wifi_conn_time_ms "+ String(last_time_to_connect) +
-                     ": mean_runtime_microsec " + String(runtime_microseconds_mean) +
                      ": sensor_error_count "    + String(sens_err_count) +
                      ": last_sensor_error "     + String(last_sens_error) +
                      ": wifi_error_count "      + String(wifi_conn_err_count) +
                      ": wifi_send_err_count "   + String(wifi_send_err_count) +
                      ": wifi_rssi "             + String(WiFi.RSSI()) +
                      ": last_sleep_reason "     + String(SR) +
+                     ": volt_raw "              + String((float)((float)pVolt[NUM_VALUES-2]/1000.0)) + 
+                     ": adc_raw_value "         + String(adc_value) +
+                     #endif
                      ": time_to_next_update "   + String(sendMinCounter<=SENSOR_MIN_UPDATE?((SENSOR_MIN_UPDATE + 1 - sendMinCounter)*SENSOR_READ_INTERVAL):0) +
                      ": time_to_FW_update "     + String((SENSOR_OTA_INTERVAL + 1 - checkOTA_count)*SENSOR_READ_INTERVAL) +
-                     ": sensor_voltage "        + String((float)((float)volt/1000.0)) + 
-                     ": volt_raw "              + String((float)((float)pVolt[NUM_VALUES-2]/1000.0)) + 
-                     ": adc_raw_value "         + String(adc_value);
+                     ": sensor_voltage "        + String((float)((float)volt/1000.0));
     if(sendData[0])
     {
-      payload = payload +  ": temperature "     + String((float)((float)temp/10.0)) +
-                           ": temp_raw "        + String((float)((float)pTemp[NUM_VALUES-2]/10.0));
+      payload = payload +  ": temperature "     + String((float)((float)temp/10.0));
+      #ifdef SENSOR_MEASURE_PERFORMANCE
+      payload = payload +  ": temp_raw "        + String((float)((float)pTemp[NUM_VALUES-2]/10.0));
+      #endif                     
     }
     if(sendData[1])
     {
-      payload = payload + ": humidity "         + String((float)((float)humi/10.0)) + 
-                          ": humi_raw "         + String((float)((float)pHumi[NUM_VALUES-2]/10.0));
+      payload = payload + ": humidity "         + String((float)((float)humi/10.0));
+      #ifdef SENSOR_MEASURE_PERFORMANCE
+      payload = payload + ": humi_raw "         + String((float)((float)pHumi[NUM_VALUES-2]/10.0));
+      #endif
     }
     if(sendData[2])
     {
+      #ifdef SENSOR_MEASURE_PERFORMANCE
+      String rts = "";
+      String srs = "";
+      for(uint8_t i=0; i<SENSOR_MIN_UPDATE; i++)
+      {
+        rts = rts + String(runtimes_milliseconds[i]);
+        srs = srs + String(SRs[i]);
+        if(i<SENSOR_MIN_UPDATE-1) 
+        {
+          rts = rts+",";
+          srs = srs+",";
+        }
+      }
+      #endif
+      // if we did send, the next enforced sending counter starts fresh
+      sendMinCounter = 0; 
+    }
+    // only need to send this once (i.e. after update or reset)
+    if(firstrun)
+    {
+      firstrun = false;
       payload = payload + ": dev_name " + "TH_Sens_" + String(chip_crc) +
                           ": FW_VERSION "       + String(FW_VERSION) +
                           ": sensor_type "      + String(SENSOR_TYPE) +
                           ": sensor_interval "  + String(SENSOR_READ_INTERVAL) +
+                          ": sensor_temp_prec " + String(SENSOR_T_PRECISION) +
+                          ": sensor_humi_prec " + String(SENSOR_H_PRECISION) +
+                          #ifdef SENSOR_MEASURE_PERFORMANCE
+                          ": last_runtimes_ms " + rts +
+                          ": last_sleep_reasons " + srs +
+                          #endif
                           ": MAC_ADDRESS "      + String(macAddr);
-      // if we did send, the next enforced sending counter starts fresh
-      sendMinCounter = 0; 
     }
     payload += "\")}\r\n";
     #ifdef DEBUG
@@ -638,11 +744,12 @@ void setup()
     #endif
 
     // This will send the request to the server
-    client.print(payload);
-    client.print("exit\r\n");
-    client.flush();
-    client.stop();
-    goto_sleep(SENSOR_READ_INTERVAL, SR_DEEP_SLEEP);
+    client->print(payload);
+    client->print("exit\r\n");
+    client->flush();
+    client->stop();
+    delete client;
+    goto_sleep(SENSOR_READ_INTERVAL, SR_SEND_DATA);
 }
 
 void loop()

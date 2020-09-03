@@ -93,6 +93,10 @@ RTC_DATA_ATTR uint16_t    pHumi[NUM_VALUES];
 // The last value represents the last "weighted mean value". 
 // this is used to check if the voltage changed.
 RTC_DATA_ATTR uint16_t    pVolt[NUM_VALUES];
+
+RTC_DATA_ATTR int16_t     lastSentTemp = 0;
+RTC_DATA_ATTR uint16_t    lastSentHumi = 0;
+
 // Check if started the first time /i.e. RTC variables not initialized)
 // This could be checked with the "boot reason" as well.
 RTC_DATA_ATTR bool        firstrun = true;
@@ -122,6 +126,13 @@ int16_t
   map16(int16_t x, int16_t in_min, int16_t in_max, int16_t out_min, int16_t out_max),
   roundToPrecision(int16_t * value, int8_t precision),
   roundFloatToInt10(float * value, int8_t precision);
+
+// saturates at s (i.e. value will not be higher)
+uint8_t addsat8( uint8_t a, uint8_t b, uint8_t s) {
+  uint16_t c = (uint16_t)a + (uint16_t)b;
+  if(c > 255 || c > s) return s;
+  return (uint8_t) c;
+}
 
 // Will diconnect the WiFi and set wifiConnected = false
 void disconnect_WiFi(bool wifi_off = true)
@@ -453,7 +464,7 @@ void setup()
     
     #ifdef DEBUG
     Serial.begin(115200);
-    DEBUGPRNTLN("\n\n");
+    DEBUGPRNTLN("\n");
     #endif
     print_wakeup_reason();
 
@@ -533,11 +544,10 @@ void setup()
     pVolt[NUM_VALUES-2] = voltage_value;
     #ifdef DEBUG
     DEBUGPRNTLN("\nSensor was read:");
-    DEBUGPRNTLN("\tTemperature: " + String((float)temperature/10.0));
-    DEBUGPRNTLN("\tHumidity:    " + String((float)humidity/10.0));
-    DEBUGPRNTLN("The voltage is currently: ");
-    DEBUGPRNTLN("\tVoltage: " + String(voltage_value) + "V");
-    DEBUGPRNTLN("\tADC Raw: " + String(adc_value));
+    DEBUGPRNT("\tValues \t  T: " + String((float)temperature/10.0));
+    DEBUGPRNT("\t  H: " + String((float)humidity/10.0));
+    DEBUGPRNT("\t  V: " + String(voltage_value));
+    DEBUGPRNTLN("\t  Raw: " + String(adc_value));
     DEBUGPRNTLN("");
     #endif
     // calculate wighted mean value
@@ -558,29 +568,42 @@ void setup()
     #ifdef DEBUG
     for(uint8_t i=0; i<NUM_VALUES; i++)
     {
-        DEBUGPRNTLN("\tItem: " + String(i));
-        DEBUGPRNTLN("\t\tT: " + String(pTemp[i]));
-        DEBUGPRNTLN("\t\tH: " + String(pHumi[i]));
-        DEBUGPRNTLN("\t\tV: " + String(pVolt[i]));
+        DEBUGPRNT("\tItem: " + String(i));
+        DEBUGPRNT("\t  T: "  + String(pTemp[i]));
+        DEBUGPRNT("\t  H: "  + String(pHumi[i]));
+        DEBUGPRNTLN("\t  V: "  + String(pVolt[i]));
     }
-    DEBUGPRNTLN("\n\tCurrent T: " + String(String((float)((float)temp/10.0))));
-    DEBUGPRNTLN(  "\tCurrent H: " + String(String((float)((float)humi/10.0))));
-    DEBUGPRNTLN(  "\tCurrent V: " + String(String((float)((float)volt/1000.0))) + "\n");
+    DEBUGPRNT("\n\tCurr \t  T: " + String(String((float)((float)temp/10.0))));
+    DEBUGPRNT(  "\t  H: " + String(String((float)((float)humi/10.0))));
+    DEBUGPRNTLN(  "\t  V: " + String(String((float)((float)volt/1000.0))) + "\n");
     #endif
 
+    uint16_t dT = abs((int)temp - (int)lastSentTemp);
+    uint16_t dH = abs((int)humi - (int)lastSentHumi);
 
-    if(temp               != pTemp[NUM_VALUES-1]) { sendData[0] = true; DEBUGPRNTLN("Need to send data because of new Temperature");}
-    if(humi               != pHumi[NUM_VALUES-1]) { sendData[1] = true; DEBUGPRNTLN("Need to send data because of new Humidity");}
+//    if(temp               != pTemp[NUM_VALUES-1]) { sendData[0] = true; DEBUGPRNTLN("Need to send data because of new Temperature");}
+//    if(humi               != pHumi[NUM_VALUES-1]) { sendData[1] = true; DEBUGPRNTLN("Need to send data because of new Humidity");}
+    if(dT >= SENSOR_MIN_DELTA_T) { sendData[0] = true; DEBUGPRNTLN("Need to send data because new Temperature and the delta is " + String(dT));}
+    if(dH >= SENSOR_MIN_DELTA_H) { sendData[1] = true; DEBUGPRNTLN("Need to send data because new Humidity and the delta is " + String(dH));}
     if(++checkOTA_count   >  SENSOR_OTA_INTERVAL) { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of FW Update Interval");}
     if(++sendMinCounter   >  SENSOR_MIN_UPDATE)   { sendData[0] = sendData[1] = sendData[2] = true; DEBUGPRNTLN("Need to send data because of Sensor Min Interval");} 
   
     if(!(sendData[0] | sendData[1] | sendData[2]) )
     {
       DEBUGPRNTLN("No need to send because no new Data. Will sleep 3 times longer...");
-      checkOTA_count += 3;
-      sendMinCounter += 3;
+      checkOTA_count = addsat8(checkOTA_count, 3, SENSOR_OTA_INTERVAL);
+      sendMinCounter = addsat8(sendMinCounter, 3, SENSOR_MIN_UPDATE);
+      DEBUGPRNTLN("\n\tOTA Count  " + String(checkOTA_count) + " of " + String(SENSOR_OTA_INTERVAL));
+      DEBUGPRNTLN(  "\tMin Update " + String(sendMinCounter) + " of " + String(SENSOR_MIN_UPDATE));
       goto_sleep(SENSOR_READ_INTERVAL*3, SR_NO_NEW_DATA);
     }
+    #ifdef DEBUG
+    else
+    {
+      DEBUGPRNTLN("\n\tOTA Count  " + String(checkOTA_count) + " of " + String(SENSOR_OTA_INTERVAL));
+      DEBUGPRNTLN(  "\tMin Update " + String(sendMinCounter) + " of " + String(SENSOR_MIN_UPDATE));
+    }
+    #endif
 
     DEBUGPRNTLN("\n\n");
 
@@ -599,10 +622,11 @@ void setup()
         // delay(5); // delay now in disconnect_WiFi
       }
     }
-    DEBUGPRNTLN("Done - Connecting to WiFi");
+    
     
     if(!wifiConnected) // this did not work as expected....
     {
+      DEBUGPRNTLN("WiFi connection failed!");
       #ifdef SENSOR_MEASURE_PERFORMANCE
       connect_time = -100;
       
@@ -612,6 +636,7 @@ void setup()
     }
     else
     {
+      DEBUGPRNTLN("WiFi connection successful!");
       #ifdef SENSOR_MEASURE_PERFORMANCE
       connect_time = (int16_t)(millis() - current_ms);
       if(wifi_conn_err_count > 0) wifi_conn_err_count--;
@@ -691,6 +716,7 @@ void setup()
     if(sendData[0])
     {
       payload = payload +  ": temperature "     + String((float)((float)temp/10.0));
+      lastSentTemp = temp;
       #ifdef SENSOR_MEASURE_PERFORMANCE
       payload = payload +  ": temp_raw "        + String((float)((float)pTemp[NUM_VALUES-2]/10.0));
       #endif                     
@@ -698,6 +724,7 @@ void setup()
     if(sendData[1])
     {
       payload = payload + ": humidity "         + String((float)((float)humi/10.0));
+      lastSentHumi = humi;
       #ifdef SENSOR_MEASURE_PERFORMANCE
       payload = payload + ": humi_raw "         + String((float)((float)pHumi[NUM_VALUES-2]/10.0));
       #endif

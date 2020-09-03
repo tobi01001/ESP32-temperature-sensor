@@ -103,6 +103,16 @@
     #error "SENSOR_H_PRECISION needs to be > 0"
 #endif
 
+#ifndef SENSOR_MIN_DELTA_T
+    #pragma message "Using default SENSOR_MIN_DELTA_T (SENSOR_T_PRECISION)"
+    #define SENSOR_MIN_DELTA_T (SENSOR_T_PRECISION)
+#endif
+
+#ifndef SENSOR_MIN_DELTA_H
+    #pragma message "Using default SENSOR_MIN_DELTA_H (SENSOR_H_PRECISION)"
+    #define SENSOR_MIN_DELTA_H (SENSOR_H_PRECISION)
+#endif
+
 // used to convert the deep sleep call to seconds.
 #define uS_TO_S_FACTOR 1000000 /* Conversion factor for micro seconds to seconds */ 
 

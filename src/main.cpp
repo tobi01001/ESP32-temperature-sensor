@@ -8,7 +8,9 @@
 #include "driver/adc.h" // used for voltage monitoring
 #include <esp_wifi.h>   // esp32 low level interface functions for WiFi
 #include <esp_bt.h>     // esp32 low level interface functions for WiFi
-#include <WifiManager.h>
+#ifdef USE_WIFIMANAGER
+  #include <WifiManager.h>
+#endif
 
 #include "config.h"
 

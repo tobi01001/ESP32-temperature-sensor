@@ -553,7 +553,7 @@ void setup()
     DEBUGPRNTLN("");
     #endif
     // calculate wighted mean value
-    uint16_t temp = 0;
+     int16_t temp = 0;
     uint16_t humi = 0;
     uint32_t volt = 0;
     uint16_t weight_div = 0;
